@@ -1,0 +1,11 @@
+[package]
+name = "dexgluco"
+version = "0.1.0"
+authors = ["Deluxo <48fk01e49@mozmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+relm4 = "0.9.1"
+relm4-components = "0.9.1"
