@@ -16,30 +16,47 @@
 - Device name pattern: Contains "DEXCOM" or sensor serial number
 - Advertisement includes the NUS service UUID
 
-## Pairing Flow
+## Application Protocol
 
-### Step 1: QR Code Scanning
-The data matrix on Dexcom ONE+ applicator packaging contains:
-- **Sensor serial number** - Unique identifier
-- **Pairing PIN** - 6-digit code for BLE bonding
+The application follows this protocol:
 
-**Library**: `rqrr` (pure Rust QR decoder)
+```rust
+fn main() {
+    // 1. Get sensors - from storage OR add new via QR+BLE
+    let sensors = get_sensors(
+        get_from_storage,  // load from DB
+        connect_new,       // QR → BLE → sensor
+    )?;
 
-**Input Methods**:
-- MVP: Image file (file picker)
-- Production: Camera via GTK4
+    // 2. Connect to sensors via BT
+    let connections = connect(via_bt);
 
-### Step 2: BLE Pairing
-1. App starts BLE scanning (filter: DEXCOM name)
-2. When sensor found, registers as BlueZ pairing agent
-3. When pairing request arrives, provides PIN automatically via agent
-4. No user interaction needed for PIN entry
+    // 3. Monitor incoming readings
+    monitor(connections);
+}
+```
 
-### Step 3: Connection
-1. Connect to sensor (GATT)
-2. Discover Nordic UART service
-3. Subscribe to RX characteristic notifications
-4. Wait for glucose data
+### get_sensors()
+
+Returns sensors either from storage or newly added:
+- If storage has sensors: returns them
+- If storage empty: runs `connect_new` (QR scan → BLE pair)
+- Returns `Result<Sensor, String>` - Left is error string, Right is sensor
+
+### connect()
+
+Connects to sensors:
+- Takes connector function (real bluer or mock)
+- Handles reconnection/re-auth internally - that's implementation detail
+- Returns vector of connections
+
+### monitor()
+
+Ongoing:
+- Subscribes to glucose notifications
+- Processes readings
+- Handles disconnects
+- Runs indefinitely
 
 ## Sensor States
 
@@ -54,10 +71,6 @@ The data matrix on Dexcom ONE+ applicator packaging contains:
 ## Warmup Time
 
 - **Dexcom ONE+**: 30 minutes
-- **Dexcom G7 (10-day)**: 30 minutes  
-- **Dexcom G7 (15-day)**: 60 minutes
-
-The warmup is managed internally by the sensor. The app waits for glucose data to arrive.
 
 ## Data Format
 
@@ -80,19 +93,9 @@ The warmup is managed internally by the sensor. The app waits for glucose data t
 | 4     | Falling |
 | 5     | Falling quickly |
 
-## Implementation Files
-
-| Component | File | Description |
-|-----------|------|-------------|
-| QR Parser | `src/ble/dexcom/qr_parser.rs` | Parse QR image → (serial, PIN) |
-| BLE Scanner | `src/ble/scanner.rs` | Device discovery |
-| Pairing Agent | `src/ble/pairing.rs` | BlueZ agent with PIN |
-| GATT Client | `src/ble/gatt.rs` | Connect, subscribe |
-| Glucose Parser | `src/ble/dexcom/parser.rs` | Decode glucose packets |
-
 ## References
 
-- Juggluco source: https://github.com/j-kaltes/Juggluco
-- Similar to Dexcom G7 protocol
+- Juggluco repository: https://github.com/j-kaltes/Juggluco
+- Dexcom ONE+ uses similar protocol to Dexcom G7
 - bluer crate: https://docs.rs/bluer
 - rqrr crate: https://crates.io/crates/rqrr

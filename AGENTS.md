@@ -16,120 +16,108 @@ Dexgluco is a Linux desktop CGM (Continuous Glucose Monitoring) application writ
 - **Async**: tokio
 - **Storage**: SQLite
 
-## Current State
+## Architecture: Functional Core / Imperative Shell
 
-- Empty project with basic relm4/GTK4 setup
-- Cargo.toml configured with relm4 and relm4-components
-- No BLE implementation yet
-- No sensor protocol implementation
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     IMPERATIVE SHELL (main.rs)              │
+│   - Wires up the protocol with partial applications        │
+│   - Injects real implementations                           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      FUNCTIONAL CORE                        │
+│   - Pure workflows (no IO, testable)                        │
+│   - get_sensors(), connect(), monitor()                     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-## Current Priority
-
-Implement BLE communication with **Dexcom ONE+** sensor.
-
-## Dexcom ONE+ Protocol
-
-### BLE UUIDs
-- Service UUID: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` (Nordic UART)
-- TX Characteristic: `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` (Write)
-- RX Characteristic: `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` (Notify)
-
-### Warmup Time
-- Dexcom ONE+ warmup: **30 minutes**
-
-## Implementation Steps
-
-### Phase 1: Core Infrastructure
-
-1. Create `src/consts.rs` - All hardcoded configuration values
-2. Add dependencies to Cargo.toml (bluer, rusqlite, chrono, rqrr, tokio)
-
-### Phase 2: QR Code Scanning
-
-3. Create `src/ble/dexcom/qr_parser.rs`
-   - Load image file
-   - Parse QR code using rqrr
-   - Extract: sensor serial, pairing PIN
-
-### Phase 3: BLE Communication
-
-4. Create `src/ble/mod.rs` - BLE module root
-5. Implement `src/ble/scanner.rs` - BLE device discovery
-   - Filter: device name contains "DEXCOM"
-   - Timeout: 60 seconds
-6. Implement `src/ble/pairing.rs` - BlueZ pairing agent
-   - Register as default agent
-   - Provide PIN automatically during pairing
-7. Implement `src/ble/gatt.rs` - GATT client
-   - Connect to sensor
-   - Discover services/characteristics
-   - Subscribe to RX notifications
-
-### Phase 4: Data Layer
-
-8. Create `src/data/mod.rs` - Data module
-9. Create `src/data/sensor.rs` - Sensor storage (cached pairing info)
-10. Create `src/data/glucose.rs` - Glucose readings storage
-
-### Phase 5: UI Layer
-
-11. Create main window with "Add Sensor" button
-12. Implement file picker → QR scan flow
-13. Display glucose value, trend arrow, timestamp
-14. Show sensor state (Pairing, Warmup, Active, Disconnected)
-
-### Multi-Sensor Architecture
+## The Protocol
 
 ```rust
-struct App {
-    sensors: HashMap<SensorId, SensorHandle>,
-}
+fn main() {
+    // 1. Get sensors - from storage OR add new via QR+BLE
+    let sensors = get_sensors(
+        get_from_storage,
+        connect_new,
+    )?;
 
-struct SensorHandle {
-    state: SensorState,
-    device: Option<Arc<SensorDevice>>,
-    pairing_info: PairingInfo,
-}
+    // 2. Connect to sensors via BT
+    let connections = connect(via_bt);
 
-enum SensorState {
-    Pairing,
-    Warmup { started: DateTime },
-    Active,
-    Disconnected,
+    // 3. Monitor incoming readings
+    monitor(connections);
 }
 ```
 
-## Key Files
+### get_sensors()
 
-| File | Purpose |
-|------|---------|
-| `src/consts.rs` | All hardcoded constants |
-| `src/main.rs` | Entry point |
-| `Cargo.toml` | Dependencies |
-| `src/ble/mod.rs` | BLE module |
-| `src/ble/scanner.rs` | BLE device discovery |
-| `src/ble/pairing.rs` | BLE pairing agent |
-| `src/ble/gatt.rs` | GATT client |
-| `src/ble/dexcom/qr_parser.rs` | QR code parsing |
-| `src/ble/dexcom/parser.rs` | Glucose data parsing |
-| `src/data/mod.rs` | Data module |
-| `src/data/sensor.rs` | Sensor storage |
-| `src/data/glucose.rs` | Glucose storage |
+```rust
+fn get_sensors(
+    get_from_storage: impl Fn() -> Result<Sensor, String>,
+    connect_new: impl Fn() -> Result<Sensor, String>,
+) -> Result<Sensor, String>
+```
+
+- Tries `get_from_storage` first (saved sensors from DB)
+- If none: tries `connect_new` (QR → BLE → new sensor)
+- Returns sensor with: serial, pin, bonding info
+
+### connect()
+
+```rust
+fn connect(
+    via_bt: impl Fn(Sensor) -> Result<Connection, String>,
+) -> Result<Vec<Connection>, String>
+```
+
+- Takes connector (real bluer or mock)
+- Handles reconnect/new auth - that's implementation detail
+
+### monitor()
+
+```rust
+fn monitor(connections: Vec<Connection>) -> Result<Infallible, String>
+```
+
+- Process glucose readings
+- Handle disconnects
+- Runs indefinitely
+
+## Error Handling
+
+All functions return `Result<T, String>`:
+- Left: error string for debugging
+- Right: success value
+
+## Partial Application
+
+Production vs test uses same code:
+
+```rust
+// Production
+let get_sensors_prod = get_sensors(sqlite_load, add_new_sensor);
+
+// Test  
+let get_sensors_test = get_sensors(|| Ok(vec![]), mock_new_sensor);
+```
+
+## Key Implementation Traits
+
+Use action-based naming (what it does, not what it is):
+- `get_from_storage` - read saved sensors
+- `connect_new` - add new sensor (QR → BLE)
+- `via_bt` - connect via Bluetooth
+- `via_qr` - decode QR image
 
 ## Commands
 
 ```bash
-# Run application
-cargo run
-
-# Check compilation
-cargo check
-
-# Build release
-cargo build --release
-
-# Linting
-cargo clippy -- -D warnings
+cargo run         # Run application
+cargo check       # Check compilation
+cargo build --release  # Build release
+cargo clippy -- -D warnings  # Linting
 ```
 
 ## Constraints
@@ -137,7 +125,7 @@ cargo clippy -- -D warnings
 - Must work on Linux with BlueZ
 - Desktop GTK4 application (not headless)
 - Start with Dexcom ONE+ only (MVP)
-- Support multiple sensors via HashMap (not limited to 1)
+- No server/cloud - local only
 
 ## Resources
 

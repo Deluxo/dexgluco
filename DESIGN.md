@@ -1,111 +1,156 @@
 # Dexgluco Design Document
 
-## UI Design
+## Architecture: Functional Core / Imperative Shell
 
-### Main Window Layout
-
-```
-┌─────────────────────────────────────────┐
-│  Dexgluco                        [─][□][×] │
-├─────────────────────────────────────────┤
-│                                         │
-│            ┌─────────────┐              │
-│            │   142      │  mg/dL       │
-│            │     ↑      │              │
-│            └─────────────┘              │
-│                                         │
-│         10:30 AM                        │
-│                                         │
-│  ┌────────────────────────────────┐    │
-│  │  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  │    │
-│  │  Graph (last 3 hours)         │    │
-│  └────────────────────────────────┘    │
-│                                         │
-│  Status: Connected                      │
-│  Sensor: DEXCOM123456                  │
-│                                         │
-│  [Scan] [Settings]                     │
-└─────────────────────────────────────────┘
-```
-
-### Components
-
-1. **Glucose Display**
-   - Large numerical value (current glucose)
-   - Unit label (mg/dL or mmol/L)
-   - Trend arrow indicator
-   - Timestamp of last reading
-
-2. **Chart**
-   - Line chart showing glucose over time
-   - X-axis: time (last 3 hours)
-   - Y-axis: glucose level
-   - Target range shading (optional)
-
-3. **Status Bar**
-   - Connection status (Connected/Scanning/Disconnected)
-   - Sensor identifier
-   - Battery level (if available)
-
-4. **Action Buttons**
-   - Scan for sensors
-   - Settings
-
-### Color Scheme
-
-- **Normal**: Green/Blue
-- **High**: Orange/Red
-- **Low**: Red
-- **Background**: Dark theme preferred for battery savings on laptops
-
-## Architecture
-
-### Modules
+The application follows the **Functional Core / Imperative Shell** pattern:
 
 ```
-src/
-├── main.rs           # Entry point
-├── lib.rs            # Library root
-├── ble/
-│   ├── mod.rs        # BLE module
-│   ├── manager.rs    # BLE device management
-│   ├── dexcom.rs     # Dexcom ONE+ protocol
-│   └── gatt.rs       # GATT characteristic handling
-├── data/
-│   ├── mod.rs        # Data module
-│   ├── glucose.rs    # Glucose reading struct
-│   └── storage.rs    # SQLite storage
-├── ui/
-│   ├── mod.rs        # UI module
-│   ├── app.rs        # Main application
-│   ├── widgets.rs    # Custom widgets
-│   └── chart.rs      # Glucose chart
-└── config.rs         # Configuration
+┌─────────────────────────────────────────────────────────────┐
+│                     IMPERATIVE SHELL                         │
+│   (main.rs - wires up the protocol, injects implementations)│
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      FUNCTIONAL CORE                        │
+│   (Pure workflows - no IO, no side effects, testable)       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### Data Structures
+---
+
+## The Protocol
+
+The application has three main operations:
 
 ```rust
-struct GlucoseReading {
-    value: f32,           // mg/dL or mmol/L
-    timestamp: DateTime,
-    trend: Trend,
-    sensor_id: String,
-}
+fn main() {
+    // Step 1: Get sensors - either from storage or add new
+    let sensors = get_sensors(
+        get_from_storage,
+        connect_new,
+    )?;
 
-enum Trend {
-    None,
-    RisingQuickly,
-    Rising,
-    Steady,
-    Falling,
-    FallingQuickly,
+    // Step 2: Connect to all sensors
+    let connections = connect(via_bt);
+
+    // Step 3: Monitor incoming readings
+    monitor(connections);
 }
 ```
 
-## Settings
+Each function is partially applied with real or mock implementations.
 
-- **Units**: mg/dL or mmol/L
-- **Target Range**: Low/High thresholds for alarms
-- **Alarms**: Enable/disable sound notifications
-- **Data Export**: Format (CSV, JSON, etc.)
+---
+
+## get_sensors()
+
+Meta function that retrieves sensors from storage OR adds new one:
+
+```rust
+fn get_sensors(
+    get_from_storage: impl Fn() -> Result<Sensor, String>,    // read saved sensors
+    connect_new: impl Fn() -> Result<Sensor, String>,          // add new: QR → BLE → sensor
+) -> Result<Sensor, String>
+```
+
+Returns `Result<Sensor, String>` - Left is error string (for debugging), Right is sensor.
+
+- Tries `get_from_storage` first
+- If returns empty/none: tries `connect_new`
+- Sensor contains everything needed: serial, pin, bonding info
+
+---
+
+## connect()
+
+Simple connector abstraction:
+
+```rust
+fn connect(
+    via_bt: impl Fn(Sensor) -> Result<Connection, String>,
+) -> Result<Vec<Connection>, String>
+```
+
+- Takes a connector function (real bluer in production, mock in tests)
+- Connector handles reconnection, re-auth, or fresh auth - that's implementation detail
+- Returns connections for monitoring
+
+---
+
+## monitor()
+
+Ongoing operation:
+
+```rust
+fn monitor(
+    connections: Vec<Connection>,
+) -> Result<Infallible, String>
+```
+
+- Processes incoming glucose readings
+- Handles disconnects/reconnects
+- Runs indefinitely (never returns normally)
+
+---
+
+## Partial Application Pattern
+
+The same functions work in production and tests:
+
+```rust
+// Production - real implementations
+let get_sensors_prod = get_sensors(
+    sqlite_load_sensors,
+    add_new_sensor_with_qr_and_ble,
+);
+
+let connect_prod = connect(bluer_connect);
+
+// Test - mock implementations
+let get_sensors_test = get_sensors(
+    vec![],  // empty storage
+    mock_new_sensor,  // returns prefilled sensor
+);
+
+let connect_test = connect(mock_connect);
+```
+
+---
+
+## Error Handling
+
+All functions return `Result<T, String>`:
+- Left: error string (for developer debugging)
+- Right: success value
+
+No complex error types needed - simple string diagnostics.
+
+---
+
+## Implementation Details
+
+### Action-Based Naming
+
+Functions describe what they do, not what concept they represent:
+
+```rust
+fn get_from_storage()     // read saved sensors
+fn connect_new()           // add new sensor via QR → BLE
+fn via_bt()               // connect via Bluetooth
+fn monitor()              // ongoing monitoring
+```
+
+### File Organization
+
+The file structure will be defined after writing main.rs - files will find their rightful place after the protocol is outlined.
+
+---
+
+## Design Principles
+
+1. **Explicit over implicit** - dependencies passed as params, not hidden in "context"
+2. **Composable** - small functions composed into workflows
+3. **Testable** - same code runs in production and tests via partial application
+4. **Simple errors** - strings for debugging, not complex error types
+5. **UI-agnostic core** - functional core has no UI knowledge; shell handles UI

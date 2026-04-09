@@ -1,74 +1,71 @@
 # Dexgluco Development TODO
 
-## Phase 1: MVP - Dexcom ONE+ Support
+## Protocol Overview
 
-### 1. Project Setup
-- [x] Basic Rust project with relm4/GTK4
-- [ ] Add required dependencies (bluer, rusqlite, chrono, tokio, rqrr)
+```
+fn main() {
+    let sensors = get_sensors(get_from_storage, connect_new)?;
+    let connections = connect(via_bt);
+    monitor(connections);
+}
+```
 
-### 2. Constants & Configuration
-- [ ] Create `src/consts.rs` with all hardcoded values
-  - BLE timeout (60s)
-  - Reconnect settings
-  - Warmup duration (30 min)
-  - Sensor duration (10 days)
+---
 
-### 3. QR Code Scanning
-- [ ] Add `rqrr` crate for QR decoding
-- [ ] Create `src/ble/dexcom/qr_parser.rs`
-- [ ] Implement: load image → parse → extract (serial, PIN)
-- [ ] Support image file input (file picker)
+## Phase 1: Define the Protocol in Code
 
-### 4. BLE Layer
-- [ ] Add `bluer` crate to Cargo.toml
-- [ ] Create `src/ble/mod.rs` - BLE module
-- [ ] Implement `src/ble/scanner.rs` - device discovery
-  - Filter: name contains "DEXCOM"
-  - Timeout: 60 seconds
-- [ ] Implement `src/ble/pairing.rs` - BlueZ pairing agent
-  - Register agent with PIN callback
-  - Auto-provide scanned PIN during pairing
-- [ ] Implement `src/ble/gatt.rs` - GATT client
-  - Connect to sensor
-  - Discover Nordic UART service
-  - Subscribe to RX characteristic (notify)
+### 1.1 Types (src/types.rs)
+- [ ] Define: Sensor, Connection, GlucoseReading, SerialNumber, PairingPin
+- [ ] Error type: `String` (simple diagnostics)
 
-### 5. Protocol Implementation
-- [ ] Create `src/ble/dexcom/mod.rs` - Dexcom protocol
-- [ ] Implement `src/ble/dexcom/parser.rs` - glucose packet parsing
-- [ ] Understand glucose data format from Juggluco
-- [ ] Handle encryption (if applicable)
+### 1.2 get_sensors (src/workflows/get_sensors.rs)
+- [ ] Function: `get_sensors(get_from_storage, connect_new) -> Result<Sensor, String>`
+- [ ] Sub-function: `get_from_storage()` - loads from DB
+- [ ] Sub-function: `connect_new()` - adds new via QR → BLE
 
-### 6. Data Layer
-- [ ] Create `src/data/mod.rs` - data module
-- [ ] Set up SQLite database with rusqlite
-- [ ] Create `src/data/sensor.rs` - sensor storage (cached pairing info)
-- [ ] Create `src/data/glucose.rs` - glucose readings storage
+### 1.3 connect (src/workflows/connect.rs)
+- [ ] Function: `connect(via_bt) -> Result<Vec<Connection>, String>`
+- [ ] Takes connector implementation
 
-### 7. Multi-Sensor Architecture
-- [ ] Implement HashMap-based sensor management
-- [ ] Support N sensors concurrently (not just 1)
-- [ ] Handle per-sensor state: NotPaired, Pairing, Warmup, Active, Expired
+### 1.4 monitor (src/workflows/monitor.rs)
+- [ ] Function: `monitor(connections) -> Result<Infallible, String>`
+- [ ] Process glucose readings
+- [ ] Handle disconnects
 
-### 8. UI Layer (relm4/GTK4)
-- [ ] Create main window layout
-- [ ] Implement "Add Sensor" button → file picker flow
-- [ ] Display current glucose value (large text)
-- [ ] Display trend arrow (↑→↓)
-- [ ] Display timestamp
-- [ ] Show connection status per sensor
-- [ ] Show warmup countdown (30 min)
-- [ ] Add settings panel (units: mg/dL or mmol/L)
+### 1.5 main.rs (src/main.rs)
+- [ ] Wire up the protocol with partial applications
+- [ ] Inject real implementations
 
-### 9. Historical Chart
-- [ ] Display mini glucose graph (last 3 hours)
-- [ ] Use GTK4 drawing or a chart library
+---
 
-## Phase 2: Future Enhancements
+## Phase 2: Implementations (Injected via Partial Application)
 
-- [ ] Camera-based QR scanning (GtkCamera)
-- [ ] Add more sensors (Libre 2/3, Dexcom G7)
-- [ ] Web server for Nightscout export
-- [ ] Alarm system
-- [ ] Statistics (time in range, average, etc.)
-- [ ] Data export functionality
+### 2.1 QR Implementation
+- [ ] `via_qr()` - decode QR from image file (rqrr)
+
+### 2.2 BLE Implementation
+- [ ] `via_bt()` - connect via Bluetooth (bluer)
+
+### 2.3 Storage Implementation
+- [ ] `get_from_storage()` - read from SQLite
+
+---
+
+## Phase 3: UI Layer (relm4/GTK4)
+
+- [ ] Create main window
+- [ ] Wire up workflow to UI events
+- [ ] Display glucose values
+
+---
+
+## Testing Strategy
+
+```rust
+// Test uses same protocol, different implementations
+let get_sensors_test = get_sensors(
+    || Ok(vec![]),           // empty storage
+    || Ok(sensor),          // mock new sensor
+);
+let connect_test = connect(|_| Ok(conn));  // mock connection
+```
