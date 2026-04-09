@@ -35,13 +35,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
     };
 
-    let sensors = get_sensors(get_from_storage, connect_new)?;
-    println!("Got {} sensor(s)", sensors.len());
-
-    let connections = connect(via_bt, sensors)?;
-    println!("Connected to {} sensor(s)", connections.len());
-
-    let _ = monitor(connections);
+    // FP pipeline: get_sensors → connect → monitor
+    get_sensors(get_from_storage, connect_new)
+        .map(|sensors| {
+            println!("Got {} sensor(s)", sensors.len());
+            sensors
+        })
+        .and_then(|sensors| connect(via_bt, sensors))
+        .map(|connections| {
+            println!("Connected {} sensor(s)", connections.len());
+            connections
+        })
+        .and_then(monitor)?;
 
     Ok(())
 }
