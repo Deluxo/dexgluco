@@ -171,47 +171,39 @@ impl ScanForSensor {
 }
 
 pub struct ConnectSensor {
-    pub serial: String,
-    pub pin: String,
-    pub address: String,
+    pub sensor: Sensor,
+    pub shared_key: Option<[u8; 16]>,
 }
 impl ConnectSensor {
     /// Connects to the sensor at the given address.
-    /// Performs full EC-JPAKE authentication handshake.
+    /// Performs full J-PAKE authentication handshake.
+    /// Fast path: if shared_key exists, skip J-PAKE rounds.
     /// Returns a Connection with an active glucose stream.
+    pub fn new(sensor: Sensor) -> Self
+    pub fn with_shared_key(sensor: Sensor, shared_key: [u8; 16]) -> Self
     pub fn run(self) -> Task<Connection>
 }
 ```
 
-**`io/ble/jpake.rs`** — EC-JPAKE Cryptography:
+**`io/ble/jpake.rs`** — Custom J-PAKE Cryptography (pure Rust):
 
-Wraps mbedtls's EC-JPAKE implementation (via `mbedtls-sys-auto` FFI):
+Implements Dexcom's custom J-PAKE protocol directly (differs from RFC 8236 EC-JPAKE).
+Uses pure Rust crates: `p256`, `sha2`, `aes`, `ecdsa`, `signature`, `elliptic-curve`:
 
 ```rust
-pub struct JPakeSession {
-    ctx: mbedtls_sys::ecjpake_context,
-}
+/// Schnorr ZKP cert (160-byte packet)
+pub struct Cert { pubkey1: AffinePoint, pubkey2: AffinePoint, hash: Scalar }
 
-impl JPakeSession {
-    /// Initialize EC-JPAKE context with pairing code as shared secret.
-    /// Role: MBEDTLS_ECJPAKE_CLIENT (we initiate pairing).
-    /// Hash: SHA-256. Curve: secp256r1 (per Dexcom spec).
-    pub fn new(pairing_code: &str) -> Result<Self, String>
+/// Party state: 2 keypairs, 3 certificates, shared key
+pub struct DexContext { pin: Scalar, key: [KeyPair; 2], certs: [Option<Cert>; 3], shared_key: [u8; 16] }
 
-    /// Generate and return round 1 message (to send to sensor).
-    pub fn write_round1(&mut self) -> Result<Vec<u8>, String>
-
-    /// Process sensor's round 1 message.
-    pub fn read_round1(&mut self, data: &[u8]) -> Result<(), String>
-
-    /// Generate and return round 2 message.
-    pub fn write_round2(&mut self) -> Result<Vec<u8>, String>
-
-    /// Process sensor's round 2 message.
-    pub fn read_round2(&mut self, data: &[u8]) -> Result<(), String>
-
-    /// Derive shared secret after both rounds complete.
-    pub fn derive_secret(&mut self) -> Result<Vec<u8>, String>
+impl DexContext {
+    pub fn new(pin: &[u8; 4]) -> Self              // Generate fresh keypairs
+    pub fn from_existing(pin: &[u8; 4], sk: &[u8; 16]) -> Self  // Bonded fast path
+    pub fn mk_round12(&self, idx: usize) -> [u8; 160]  // Create round 1 or 2 packet
+    pub fn mk_round3(&self, pub_keys: &[[u8; 64]; 3]) -> [u8; 160]  // Create round 3
+    pub fn put_pub_key(&mut self, idx: usize, pkt: &[u8; 160]) -> Result<(), String>
+        // Validate + store peer's cert, derive shared key at idx==2
 }
 ```
 
@@ -220,20 +212,20 @@ impl JPakeSession {
 Models the full Dexcom G7/ONE+ authentication handshake as a state machine:
 
 ```rust
-pub struct BleSession { /* bluer device, characteristics, phase, jpake */ }
+pub struct BleSession { /* device, ctx, characteristics, phase, bonded, cert_buf, ... */ }
 
 impl BleSession {
-    pub fn new(device: bluer::Device, pin: &str) -> Result<Self, String>
-    pub async fn authenticate(&mut self) -> Result<(), String>
-    pub async fn read_glucose(&mut self) -> Result<GlucoseReading, String>
+    pub fn new(device: bluer::Device, pin: &[u8; 4], shared_key: Option<&[u8; 16]>) -> Self
+    pub async fn authenticate(&mut self) -> Result<[u8; 16], String>
+    pub async fn read_glucose(&mut self, stream: &mut impl Stream<Item=Vec<u8>>) -> Result<GlucoseReading, String>
 }
 ```
 
 The auth state machine has these phases:
 
 ```
-Init → PakeRound0 → PakeRound1 → PakeRound2 → Challenge
-→ CertificateExchange → ProofOfPossession → KeepAlive → BondRequest → Authenticated
+Init → [bonded? RequestAuth : Round1] → Round2 → Round3 → RequestAuth
+→ ChallengeReply → [certificate exchange if bonding] → GetData
 ```
 
 Each phase corresponds to specific BLE writes/notifications on the auth characteristics.
@@ -362,7 +354,8 @@ src/
     qr.rs           # ScanDataMatrix — rxing
     ble/
       mod.rs        # ScanForSensor, ConnectSensor — re-exports
-      jpake.rs      # JPakeSession — mbedtls EC-JPAKE FFI wrapper
+      certs.rs      # DER certificate constants (keks_p1, keks_p2, keyC)
+      jpake.rs      # DexContext — custom J-PAKE (pure Rust p256)
       protocol.rs   # BleSession — BLE auth state machine
   lib.rs            # pub mod core; pub mod io;
   main.rs           # Wiring layer: partial application + execution
@@ -376,7 +369,7 @@ tests/
 ```
 main.rs  depends on: core, io
 core/    depends on: io::task (Task type only), core::types
-io/      depends on: io::task, rusqlite, bluer, rxing, mbedtls
+io/      depends on: io::task, rusqlite, bluer, rxing, p256, sha2, aes
 ```
 
 These rules are not enforced by the compiler (except through `Cargo.toml` features), but they are enforced by convention. A PR that imports `bluer` in `core/mod.rs` should be rejected in review.

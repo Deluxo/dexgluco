@@ -19,6 +19,7 @@ fn main() -> Result<(), String> {
             serial,
             pin,
             address: "00:11:22:33:44:55".to_string(),
+            shared_key: None,
         })
     };
 

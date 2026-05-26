@@ -4,6 +4,7 @@ pub struct Sensor {
     pub serial: String,
     pub pin: String,
     pub address: String,
+    pub shared_key: Option<[u8; 16]>,
 }
 
 #[derive(Clone, Debug)]

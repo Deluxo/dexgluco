@@ -1,5 +1,6 @@
 pub mod jpake;
 pub mod protocol;
+pub mod certs;
 
 use crate::core::{Connection, Sensor};
 use crate::io::task::Task;
@@ -8,6 +9,8 @@ use bluer::{
 };
 use futures::StreamExt;
 use std::time::Duration;
+
+use self::protocol::BleSession;
 
 const DEXCOM_SERVICE_UUID: &str = "f8083532-849e-531c-c594-30f1f86a4ea5";
 
@@ -75,17 +78,24 @@ impl ScanForSensor {
     }
 }
 
-fn dexcom_uuid() -> bluer::Uuid {
-    DEXCOM_SERVICE_UUID.parse().expect("valid Dexcom UUID")
-}
-
 pub struct ConnectSensor {
     pub sensor: Sensor,
+    pub shared_key: Option<[u8; 16]>,
 }
 
 impl ConnectSensor {
     pub fn new(sensor: Sensor) -> Self {
-        ConnectSensor { sensor }
+        ConnectSensor {
+            sensor,
+            shared_key: None,
+        }
+    }
+
+    pub fn with_shared_key(sensor: Sensor, shared_key: [u8; 16]) -> Self {
+        ConnectSensor {
+            sensor,
+            shared_key: Some(shared_key),
+        }
     }
 
     pub fn run(self) -> Task<Connection> {
@@ -108,7 +118,6 @@ impl ConnectSensor {
                 .await
                 .map_err(|e| format!("BLE connect: {}", e))?;
 
-            // Wait for services to resolve
             let wait_start = std::time::Instant::now();
             let wait_timeout = Duration::from_secs(10);
             while wait_start.elapsed() < wait_timeout {
@@ -122,22 +131,21 @@ impl ConnectSensor {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
 
-            // Verify the Dexcom service is present
-            let has_dexcom = device
-                .uuids()
-                .await
-                .map_err(|e| format!("UUID query: {}", e))?
-                .map(|uuids| uuids.iter().any(|u| u == &dexcom_uuid()))
-                .unwrap_or(false);
+            let pin_bytes: [u8; 4] = {
+                let b = self.sensor.pin.as_bytes();
+                let mut p = [0u8; 4];
+                let len = b.len().min(4);
+                p[..len].copy_from_slice(&b[..len]);
+                p
+            };
 
-            if !has_dexcom {
-                return Err("Dexcom service not found on device".into());
-            }
+            let mut ble_session = BleSession::new(
+                device,
+                &pin_bytes,
+                self.shared_key.as_ref(),
+            );
 
-            // TODO: Perform J-PAKE authentication handshake
-            // 1. Find auth characteristic (3535) on the Dexcom service
-            // 2. Perform J-PAKE round 1/2 with the pairing pin
-            // 3. Authenticate and subscribe to glucose data
+            let _shared_key = ble_session.authenticate().await?;
 
             Ok(Connection {
                 sensor: self.sensor,

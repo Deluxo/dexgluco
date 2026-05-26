@@ -9,7 +9,8 @@ fn open_db(path: &str) -> Result<Connection, String> {
         "CREATE TABLE IF NOT EXISTS sensors (
             serial TEXT PRIMARY KEY,
             pin TEXT NOT NULL,
-            address TEXT NOT NULL
+            address TEXT NOT NULL,
+            shared_key BLOB
         );",
     )
     .map_err(|e| format!("DB init: {}", e))?;
@@ -33,14 +34,25 @@ impl LoadSensors {
             tokio::task::spawn_blocking(move || -> Result<Vec<Sensor>, String> {
                 let conn = open_db(&path)?;
                 let mut stmt =
-                    conn.prepare("SELECT serial, pin, address FROM sensors")
+                    conn.prepare("SELECT serial, pin, address, shared_key FROM sensors")
                         .map_err(|e| format!("DB query: {}", e))?;
                 let rows = stmt
                     .query_map([], |row| {
+                        let shared_key_blob: Option<Vec<u8>> = row.get(3).ok();
+                        let shared_key = shared_key_blob.and_then(|v| {
+                            let mut arr = [0u8; 16];
+                            if v.len() == 16 {
+                                arr.copy_from_slice(&v);
+                                Some(arr)
+                            } else {
+                                None
+                            }
+                        });
                         Ok(Sensor {
                             serial: row.get(0)?,
                             pin: row.get(1)?,
                             address: row.get(2)?,
+                            shared_key,
                         })
                     })
                     .map_err(|e| format!("DB query: {}", e))?;
@@ -75,9 +87,10 @@ impl SaveSensor {
             let sensor = self.sensor;
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 let conn = open_db(&path)?;
+                let shared_key_blob: Option<Vec<u8>> = sensor.shared_key.map(|k| k.to_vec());
                 conn.execute(
-                    "INSERT OR REPLACE INTO sensors (serial, pin, address) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![sensor.serial, sensor.pin, sensor.address],
+                    "INSERT OR REPLACE INTO sensors (serial, pin, address, shared_key) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![sensor.serial, sensor.pin, sensor.address, shared_key_blob],
                 )
                 .map_err(|e| format!("DB insert: {}", e))?;
                 Ok(())

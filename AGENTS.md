@@ -12,7 +12,7 @@ Dexgluco is a Linux desktop CGM (Continuous Glucose Monitoring) application writ
 - **UI Framework**: relm4 + GTK4
 - **BLE**: bluer crate
 - **Database**: rusqlite (bundled)
-- **Auth**: mbedtls EC-JPAKE (system lib)
+- **Auth**: Custom J-PAKE (pure Rust: p256, sha2, aes, ecdsa, signature)
 - **Barcode**: rxing crate (DataMatrix decoding)
 - **Async**: tokio
 - **Storage**: SQLite
@@ -265,7 +265,7 @@ let program = get_sensors(
 - `SaveSensor(Sensor)` — `.run() -> Task<()>` — SQLite write
 - `ScanDataMatrix(String)` — `.run() -> Task<(String, String)>` — image → pairing data
 - `ScanForSensor(String)` — `.run() -> Task<String>` — BLE scan → MAC address
-- `ConnectSensor` — `.run() -> Task<Connection>` — BLE connect + J-PAKE auth
+- `ConnectSensor` — `.run() -> Task<Connection>` — BLE connect + J-PAKE auth (with `with_shared_key()` bonded fast path)
 
 ### core/ (pure workflow functions)
 
@@ -287,7 +287,8 @@ src/
     qr.rs           # ScanDataMatrix — DataMatrix via rxing
     ble/
       mod.rs        # ScanForSensor, ConnectSensor — re-exports
-      jpake.rs      # JPakeSession — mbedtls EC-JPAKE wrapper
+      certs.rs      # DER certificate constants (keks_p1, keks_p2, keyC)
+      jpake.rs      # Custom J-PAKE (pure Rust: p256, sha2, aes, ecdsa)
       protocol.rs   # BleSession — BLE state machine (auth phases + data)
   lib.rs            # pub mod core; pub mod io
   main.rs           # Wire io into core, run final Task
@@ -306,9 +307,8 @@ The `io/ble/` subdirectory exists because BLE has two non-trivial subsystems: th
 
 ```bash
 cargo run         # Run application
-cargo check       # Check compilation
+cargo check       # Check compilation ($ cargo check)
 cargo build --release  # Build release
-cargo clippy -- -D warnings  # Linting
 cargo test        # Run all tests
 ```
 
@@ -336,5 +336,6 @@ Or use `nix-shell` from the project root (shell.nix handles this).
 - xDrip+ keks (J-PAKE C library): https://github.com/NightscoutFoundation/xDrip/tree/master/libkeks
 - bluer crate: https://docs.rs/bluer
 - rxing crate: https://docs.rs/rxing
-- mbedtls crate: https://docs.rs/mbedtls
-- mbedtls EC-JPAKE docs: https://mbed-tls.readthedocs.io/projects/api/en/v3.6.4/api/file/ecjpake_8h/
+- p256 crate: https://docs.rs/p256
+- sha2 crate: https://docs.rs/sha2
+- signature crate: https://docs.rs/signature

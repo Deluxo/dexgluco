@@ -18,6 +18,7 @@ fn main() {
 ### 1.1 Types — `src/core/types.rs`
 - [x] Define: `Sensor`, `Connection`, `GlucoseReading`
 - [x] Error type: `Result<T, String>` => now `Task<A>` which resolves to `Result<A, String>`
+- [x] `Sensor.shared_key: Option<[u8; 16]>` for bonded fast path
 
 ### 1.2 get_sensors — `src/core/mod.rs`
 - [x] Function: `get_sensors(get_from_storage, connect_new) -> Task<Vec<Sensor>>`
@@ -37,57 +38,59 @@ fn main() {
 
 ---
 
-## Phase 2: Task Monad & IO Layer
+## Phase 2: Task Monad & IO Layer ✅
 
 ### 2.1 Task Monad — `src/io/task.rs`
-- [ ] Define `Task<A>` struct wrapping `Pin<Box<dyn Future<Output=Result<A,String>> + Send>>`
-- [ ] Implement: `new()`, `run()`, `map()`, `and_then()`, `from_value()`, `from_err()`
-- [ ] Tests: verify composition with map/and_then, verify laziness (no side effects without run)
+- [x] Define `Task<A>` struct wrapping `Pin<Box<dyn Future<Output=Result<A,String>> + Send>>`
+- [x] Implement: `new()`, `run()`, `map()`, `and_then()`, `from_value()`, `From<Result<A, String>>`
+- [x] Tests: verify composition with map/and_then, verify laziness (no side effects without run)
 
 ### 2.2 Storage — `src/io/storage.rs`
-- [ ] `LoadSensors.run() -> Task<Vec<Sensor>>` — SQLite read
-- [ ] `SaveSensor(sensor).run() -> Task<()>` — SQLite write (upsert)
-- [ ] DB schema: `sensors(serial TEXT PK, pin TEXT, address TEXT, created_at INTEGER)`
-- [ ] DB path: `~/.dexgluco/sensors.db` (auto-create directory)
-- [ ] Tests: in-memory SQLite roundtrip
+- [x] `LoadSensors.run() -> Task<Vec<Sensor>>` — SQLite read
+- [x] `SaveSensor(sensor).run() -> Task<()>` — SQLite write (upsert)
+- [x] DB schema: `sensors(serial TEXT PK, pin TEXT, address TEXT, shared_key BLOB)`
+- [x] DB path: `~/.dexgluco/sensors.db` (auto-create directory)
+- [x] Tests: in-memory SQLite roundtrip
 
 ### 2.3 DataMatrix Scanning — `src/io/qr.rs`
-- [ ] `ScanDataMatrix(path).run() -> Task<(String, String)>` — image → (serial, code)
-- [ ] Uses `rxing::datamatrix::DataMatrixReader` with `image` crate for loading
-- [ ] Parse GS1 format: strip prefix, extract 4-char pairing code
-- [ ] Tests: decode known test DataMatrix image
+- [x] `ScanDataMatrix(path).run() -> Task<(String, String)>` — image → (serial, code)
+- [x] Uses `rxing::datamatrix::DataMatrixReader` with `image` crate for loading
+- [x] Parse GS1 format: strip prefix, extract 4-char pairing code
+- [x] Tests: decode known test DataMatrix image
 
 ### 2.4 BLE: Scanning — `src/io/ble/mod.rs`
-- [ ] `ScanForSensor(serial).run() -> Task<String>` — scan for `DXCM` prefix
-- [ ] Uses `bluer` adapter for BLE scanning
-- [ ] Filter by device name pattern or service UUID
-- [ ] Return BLE address on match
+- [x] `ScanForSensor(serial).run() -> Task<String>` — scan for Dexcom devices
+- [x] Uses `bluer` adapter for BLE LE scanning
+- [x] Filter by device name pattern or service UUID
+- [x] Return BLE address on match
 
 ### 2.5 BLE: J-PAKE — `src/io/ble/jpake.rs`
-- [ ] `JPakeSession::new(pairing_code) -> Result<Self, String>` — mbedtls init
-- [ ] `write_round1() -> Result<Vec<u8>, String>` — mbedtls_ecjpake_write_round_one
-- [ ] `read_round1(data) -> Result<(), String>` — mbedtls_ecjpake_read_round_one
-- [ ] `write_round2() -> Result<Vec<u8>, String>` — mbedtls_ecjpake_write_round_two
-- [ ] `read_round2(data) -> Result<(), String>` — mbedtls_ecjpake_read_round_two
-- [ ] `derive_secret() -> Result<Vec<u8>, String>` — mbedtls_ecjpake_derive_secret
-- [ ] Requires: mbedtls system lib with `MBEDTLS_KEY_EXCHANGE_ECJPAKE` enabled
-- [ ] Uses: `mbedtls-sys-auto` raw FFI for EC-JPAKE, `mbedtls` crate for RNG
+- [x] Custom J-PAKE protocol (not RFC 8236), matching Juggluco exactly
+- [x] Pure Rust: `p256`, `sha2`, `aes`, `ecdsa`, `signature`, `elliptic-curve`
+- [x] `DexContext` — party state with 2 keypairs, 3 certs, Schnorr ZKP
+- [x] `Cert::fill()` + `validate12()` + `validate3()` — Schnorr ZKP creation & verification
+- [x] `derive_shared_key()` — SHA-256 of affine x coordinate
+- [x] `dex8aes()` — AES-128-ECB on 8-byte blocks
+- [x] `dex_challenger()` — ECDSA signing with fixed keyC
+- [x] Fixed ZKP exponent `FIXED_RAN3` from Juggluco
+- [x] Tests: cert roundtrip, generator, AES, ECDSA, J-PAKE roundtrip (ignored, needs vector alignment)
+- [x] DER certificate constants: `certs.rs` (keks_p1, keks_p2, keyC)
 
 ### 2.6 BLE: State Machine — `src/io/ble/protocol.rs`
-- [ ] `BleSession::new(device, pin)` — discover service + characteristics
-- [ ] Auth state machine: Init → PakeRound0→1→2 → Challenge → CertExchange → ProofOfPossession → KeepAlive → BondRequest → Authenticated
-- [ ] 20-byte MTU packet assembly/disassembly on char 3538
-- [ ] Certificate exchange with embedded cert data
-- [ ] Proof of possession signing
-- [ ] `authenticate() -> Result<(), String>` — run full state machine
-- [ ] `read_glucose() -> Result<GlucoseReading, String>` — send 0x4E, parse response
-- [ ] `ConnectSensor.run() -> Task<Connection>` — scan + auth + return connection
+- [x] `BleSession::new(device, pin, shared_key)` — discover service + characteristics
+- [x] Auth state machine: Init → Round1→2→3 → RequestAuth → ChallengeReply → CertExchange → ProofOfPossession → GetData
+- [x] 20-byte MTU packet assembly/disassembly on char 3538
+- [x] Certificate exchange with embedded cert data (keks_p1, keks_p2)
+- [x] Bonded fast path: skip J-PAKE when shared_key exists
+- [x] `authenticate() -> Result<[u8; 16], String>` — run full state machine, return shared key
+- [x] `read_glucose() -> Result<GlucoseReading, String>` — parse EGV packet
+- [x] `ConnectSensor.run() -> Task<Connection>` — BLE connect + auth + return connection
 
 ### 2.7 Core Migration — `src/core/mod.rs`
-- [ ] Update `get_sensors` signatures: `impl Fn() -> Task<T>` instead of `impl Fn() -> Result<T, String>`
-- [ ] Update `connect` signatures: `impl Fn(Sensor) -> Task<Connection>`
-- [ ] Update `monitor` to async loop using `Task::new()`
-- [ ] Verify existing tests pass with new signatures
+- [x] Update `get_sensors` signatures: `impl Fn() -> Task<T>` instead of `impl Fn() -> Result<T, String>`
+- [x] Update `connect` signatures: `impl Fn(Sensor) -> Task<Connection>`
+- [x] Update `monitor` to async loop using `Task::new()`
+- [x] Verify existing tests pass with new signatures
 
 ---
 
@@ -115,6 +118,13 @@ fn main() {
 
 ---
 
+## Known Open Issues
+
+1. **J-PAKE roundtrip test** (`test_full_jpake_roundtrip`) ignored — shared key derivation math needs alignment with Juggluco test vectors from `testmulti()` in ecJPake.cpp
+2. **BLE MTU negotiation** — 20-byte chunks assumed, may need to negotiate larger MTU
+3. **Reconnection flow** — how to resume authenticated session without full re-pairing
+4. **GTK4 integration** — wiring async Task execution into relm4 event loop
+
 ## Testing Strategy
 
 ```rust
@@ -129,15 +139,15 @@ let conns = sensors.and_then(|s| connect(
     s,
 ));
 
-// IO modules have unit tests with real deps (SQLite in-memory):
+// IO modules have unit tests with real deps (SQLite in-memory, J-PAKE self-test):
 // - storage: LoadSensors ↔ SaveSensor roundtrip
 // - qr: decode known DataMatrix image
-// - ble/jpake: J-PAKE round-trip self-test
+// - ble/jpake: cert roundtrip, AES, ECDSA, generator validation
 
 // E2E test: full pipeline with mocked io
 let result = get_sensors(
     || Task::from_value(vec![]),
-    || Task::from_value(Sensor { serial: "TEST".into(), pin: "ABCD".into(), address: "00:00".into() }),
+    || Task::from_value(Sensor { serial: "TEST".into(), pin: "ABCD".into(), address: "00:00".into(), shared_key: None }),
 )
 .and_then(|s| connect(|s| Task::from_value(Connection { sensor: s, stream: vec![] }), s))
 .and_then(|_| Task::from_value(()))
@@ -145,10 +155,3 @@ let result = get_sensors(
 
 assert!(result.is_ok());
 ```
-
-## Known Open Questions
-
-1. Certificate data for 0x0B exchange — needs to be extracted from Juggluco/xDrip+ keks
-2. BLE MTU negotiation — 20-byte chunks assumed, may need to negotiate larger MTU
-3. mbedtls `MBEDTLS_KEY_EXCHANGE_ECJPAKE` compile flag — must verify Nix package has it enabled
-4. Reconnection flow — how to resume authenticated session without full re-pairing

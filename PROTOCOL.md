@@ -292,31 +292,54 @@ Byte 13-17: Reserved
 - **Dexcom ONE+**: 30 minutes
 - No readings are available during warmup
 
-## EC-JPAKE Implementation Details
+## Custom J-PAKE Implementation (Pure Rust)
 
-The J-PAKE protocol is implemented using **mbedtls EC-JPAKE**:
+*Dexcom does NOT use standard RFC 8236 EC-JPAKE. This implements Juggluco's custom protocol exactly.*
+
+The J-PAKE protocol is implemented in pure Rust using `p256`, `sha2`, `aes`, `ecdsa`, `signature`:
 
 ```
-Setup:
-  role    = MBEDTLS_ECJPAKE_CLIENT
-  hash    = MBEDTLS_MD_SHA256
-  curve   = MBEDTLS_ECP_DP_SECP256R1
-  secret  = pairing_code bytes (ASCII)
-  
-Round 1: 
-  mbedtls_ecjpake_write_round_one(ctx, buf, len, &olen, f_rng, p_rng)
-  mbedtls_ecjpake_read_round_one(ctx, buf, len)
+Key material:
+  2 keypairs per party (key[0], key[1]) on secp256r1
+  PIN = 4 ASCII bytes → Scalar via LE bytes in upper 32 bits of 32-byte repr
+  Fixed nonces: FIXED_RAN1, FIXED_RAN2 (random for production),
+                FIXED_RAN3 = 0xfbc971b8... (fixed, from Juggluco)
 
-Round 2:
-  mbedtls_ecjpake_write_round_two(ctx, buf, len, &olen, f_rng, p_rng)
-  mbedtls_ecjpake_read_round_two(ctx, buf, len)
+Round 1 (idx=0):
+  g2 = G × pin                          (generator scaled by pin)
+  cert = fill(g2, key[0].pub, key[0].priv, ran1)   (Schnorr ZKP)
 
-Derive:
-  mbedtls_ecjpake_derive_secret(ctx, buf, len, &olen, f_rng, p_rng)
-  mbedtls_ecjpake_write_shared_key(ctx, buf, len, &olen, f_rng, p_rng)
+Round 2 (idx=1):
+  g12 = G + other_r1.pubkey1            (EC point addition)
+  point = g12 × key[0].priv             (DH exchange)
+  cert = fill(g2, point, key[1].priv, ran2)          (ZKP of key[1])
+
+Round 3:
+  a = pub0, b = pub1 (other party's public keys from protocol)
+  x2s = key[1].priv × pin
+  g134 = pub2 + pub0 + pub1             (combined key)
+  a_point = g134 × x2s
+  cert = fill(g134, a_point, x2s, FIXED_RAN3)
+
+Shared key derivation:
+  num = -(x2 × pin)                     (scalar)
+  term = cert2.pubkey1 × num            (EC mult)
+  key = (cert3.pubkey1 + term) × x2     (EC mult + add)
+  shared_key = SHA-256(x-coordinate)[..16]
+
+Schnorr ZKP hash input:
+  len(4)||point(65)||len(4)||gv(65)||len(4)||A(65)||len(6)||"client"
+
+Certificate exchange:
+  Two DER X.509 certificates (keks_p1: 490 bytes, keks_p2: 461 bytes)
+  Sent as opaque blobs on char 3538 (never cryptographically verified by sensor)
+
+Proof of Possession:
+  ECDSA signature (SHA-256(challenge[2..18])) with fixed keyC
+  AES-128-ECB challenge-response on 8-byte blocks
 ```
 
-The pairing code (ASCII) is passed directly as the pre-shared secret. The RNG function is mbedtls's CTR_DRBG seeded from the OS entropy source.
+The pairing code (4 ASCII bytes) is converted to a scalar via `pin[0..4] → big-endian u32 → copy into bytes[28..32]`.
 
 ## References
 

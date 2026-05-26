@@ -43,6 +43,7 @@ async fn test_storage_save_and_load() {
         serial: "TEST123".into(),
         pin: "6044".into(),
         address: "AA:BB:CC:DD:EE:FF".into(),
+        shared_key: None,
     };
 
     SaveSensor::new(&path, sensor.clone())

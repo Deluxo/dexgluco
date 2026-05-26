@@ -7,6 +7,7 @@ async fn test_get_sensors_returns_stored_when_available() {
         serial: "STORED123".to_string(),
         pin: "111111".to_string(),
         address: "AA:BB:CC:DD:EE:FF".to_string(),
+        shared_key: None,
     };
 
     let get_from_storage = move || Task::from_value(vec![stored_sensor.clone()]);
@@ -26,6 +27,7 @@ async fn test_get_sensors_calls_connect_new_when_storage_empty() {
             serial: "NEW456".to_string(),
             pin: "222222".to_string(),
             address: "11:22:33:44:55:66".to_string(),
+            shared_key: None,
         })
     };
 
@@ -49,8 +51,8 @@ async fn test_get_sensors_returns_error_from_storage() {
 #[tokio::test]
 async fn test_connect_calls_via_bt_for_each_sensor() {
     let sensors = vec![
-        Sensor { serial: "A".to_string(), pin: "1".to_string(), address: "A1".to_string() },
-        Sensor { serial: "B".to_string(), pin: "2".to_string(), address: "B2".to_string() },
+        Sensor { serial: "A".to_string(), pin: "1".to_string(), address: "A1".to_string(), shared_key: None },
+        Sensor { serial: "B".to_string(), pin: "2".to_string(), address: "B2".to_string(), shared_key: None },
     ];
 
     let via_bt = |sensor: Sensor| {
@@ -68,7 +70,7 @@ async fn test_connect_calls_via_bt_for_each_sensor() {
 #[tokio::test]
 async fn test_connect_returns_error_when_via_bt_fails() {
     let sensors = vec![
-        Sensor { serial: "A".to_string(), pin: "1".to_string(), address: "A1".to_string() },
+        Sensor { serial: "A".to_string(), pin: "1".to_string(), address: "A1".to_string(), shared_key: None },
     ];
 
     let via_bt = |_: Sensor| -> Task<Connection> {
@@ -97,7 +99,7 @@ async fn test_connect_handles_empty_sensor_list() {
 async fn test_monitor_runs_indefinitely() {
     let connections = vec![
         Connection {
-            sensor: Sensor { serial: "X".to_string(), pin: "1".to_string(), address: "X1".to_string() },
+            sensor: Sensor { serial: "X".to_string(), pin: "1".to_string(), address: "X1".to_string(), shared_key: None },
             stream: vec![],
         }
     ];
