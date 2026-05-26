@@ -2,40 +2,41 @@ pub mod types;
 
 pub use types::{Sensor, Connection, GlucoseReading};
 
+use crate::io::Task;
+
 pub type AppError = String;
 pub type AppResult<T> = Result<T, AppError>;
 
 pub fn get_sensors(
-    get_from_storage: impl Fn() -> AppResult<Vec<Sensor>>,
-    connect_new: impl Fn() -> AppResult<Sensor>,
-) -> AppResult<Vec<Sensor>> {
-    let stored = get_from_storage()?;
-
-    if !stored.is_empty() {
-        return Ok(stored);
-    }
-
-    let new_sensor = connect_new()?;
-    Ok(vec![new_sensor])
+    get_from_storage: impl Fn() -> Task<Vec<Sensor>> + Send + 'static,
+    connect_new: impl Fn() -> Task<Sensor> + Send + 'static,
+) -> Task<Vec<Sensor>> {
+    get_from_storage().and_then(move |stored| {
+        if !stored.is_empty() {
+            Task::from_value(stored)
+        } else {
+            connect_new().map(|s| vec![s])
+        }
+    })
 }
 
 pub fn connect(
-    mut via_bt: impl FnMut(Sensor) -> AppResult<Connection>,
+    mut via_bt: impl FnMut(Sensor) -> Task<Connection> + Send + 'static,
     sensors: Vec<Sensor>,
-) -> AppResult<Vec<Connection>> {
-    let mut connections = Vec::new();
-
-    for sensor in sensors {
-        let conn = via_bt(sensor)?;
-        connections.push(conn);
-    }
-
-    Ok(connections)
+) -> Task<Vec<Connection>> {
+    Task::new(async move {
+        let mut connections = Vec::with_capacity(sensors.len());
+        for sensor in sensors {
+            connections.push(via_bt(sensor).await?);
+        }
+        Ok(connections)
+    })
 }
 
-pub fn monitor(_connections: Vec<Connection>) -> AppResult<()> {
-    println!("Monitoring started - press Ctrl+C to stop");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
+pub fn monitor(_connections: Vec<Connection>) -> Task<()> {
+    Task::new(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    })
 }

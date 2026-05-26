@@ -312,6 +312,15 @@ cargo clippy -- -D warnings  # Linting
 cargo test        # Run all tests
 ```
 
+### Build Prerequisites
+
+**dbus development headers** are required for the `bluer` (bluetoothd feature) crate.
+On NixOS, update `PKG_CONFIG_PATH` to include `dbus.dev`:
+```bash
+export PKG_CONFIG_PATH="$(nix-build --no-out-link -E 'with import <nixpkgs> {}; dbus.dev')/lib/pkgconfig:$PKG_CONFIG_PATH"
+```
+Or use `nix-shell` from the project root (shell.nix handles this).
+
 ## Constraints
 
 - Must work on Linux with BlueZ

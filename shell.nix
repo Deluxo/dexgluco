@@ -1,8 +1,9 @@
 { pkgs ? import <nixpkgs> {} }:
 
+let
+  dbus-dev = pkgs.dbus.dev;
+in
 pkgs.mkShell {
-    strictDeps = true;
-
     nativeBuildInputs = with pkgs; [
       cargo
       rustc
@@ -13,11 +14,14 @@ pkgs.mkShell {
     ];
     buildInputs = with pkgs; [
       rust-analyzer
+      dbus
       gtk4
       libsoup_3
       glib
       pango
       gdk-pixbuf
+      mbedtls
     ];
-    LIBRARY_PATH = "${pkgs.gdk-pixbuf}/lib";
+    LIBRARY_PATH = "${pkgs.gdk-pixbuf}/lib:${pkgs.mbedtls}/lib";
+    PKG_CONFIG_PATH = "${dbus-dev}/lib/pkgconfig";
 }
