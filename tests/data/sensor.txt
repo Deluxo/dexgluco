@@ -1,0 +1,11 @@
+Serial:
+667529744201
+
+PIN:
+6044
+
+Address:
+C1:E9:15:F5:FA:6F
+
+QR Path:
+/home/lukas/dev/dexgluco/tests/data/sensor-qr.jpg
