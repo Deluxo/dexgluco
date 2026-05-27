@@ -2,7 +2,7 @@ pub mod jpake;
 pub mod protocol;
 pub mod certs;
 
-use crate::core::{Connection, Sensor};
+use crate::core::{Connection, Sensor, GlucoseReading};
 use crate::io::task::Task;
 use bluer::{
     AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session,
@@ -151,6 +151,94 @@ impl ConnectSensor {
                 sensor: self.sensor,
                 stream: vec![],
             })
+        })
+    }
+}
+
+pub struct MonitorSensor {
+    pub sensor: Sensor,
+}
+
+impl MonitorSensor {
+    pub fn new(sensor: Sensor) -> Self {
+        MonitorSensor { sensor }
+    }
+
+    pub fn run<F>(self, mut on_reading: F) -> Task<()>
+    where
+        F: FnMut(GlucoseReading) + Send + 'static,
+    {
+        Task::new(async move {
+            let session = Session::new().await.map_err(|e| format!("BLE session: {}", e))?;
+            let adapter = session
+                .default_adapter()
+                .await
+                .map_err(|e| format!("BLE adapter: {}", e))?;
+
+            let addr: Address = self
+                .sensor
+                .address
+                .parse()
+                .map_err(|e| format!("Invalid address '{}': {}", self.sensor.address, e))?;
+            let device = adapter.device(addr).map_err(|e| format!("Device: {}", e))?;
+
+            device
+                .connect()
+                .await
+                .map_err(|e| format!("BLE connect: {}", e))?;
+
+            let wait_start = std::time::Instant::now();
+            let wait_timeout = Duration::from_secs(10);
+            while wait_start.elapsed() < wait_timeout {
+                if device
+                    .is_services_resolved()
+                    .await
+                    .map_err(|e| format!("Services resolved check: {}", e))?
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            let pin_bytes: [u8; 4] = {
+                let b = self.sensor.pin.as_bytes();
+                let mut p = [0u8; 4];
+                let len = b.len().min(4);
+                p[..len].copy_from_slice(&b[..len]);
+                p
+            };
+
+            let mut ble_session = BleSession::new(
+                device,
+                &pin_bytes,
+                self.sensor.shared_key.as_ref(),
+            );
+
+            ble_session.authenticate().await?;
+
+            let mut control_stream = ble_session
+                .take_control_stream()
+                .ok_or("No control stream available after auth".to_string())?;
+
+            loop {
+                tokio::select! {
+                    Some(data) = control_stream.next() => {
+                        if data.len() >= 19 && data[0] == 0x4E {
+                            match protocol::parse_egv(&data) {
+                                Ok(reading) => {
+                                    on_reading(reading);
+                                }
+                                Err(e) => {
+                                    eprintln!("Parse error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    else => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
         })
     }
 }

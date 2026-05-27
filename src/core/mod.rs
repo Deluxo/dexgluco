@@ -33,10 +33,15 @@ pub fn connect(
     })
 }
 
-pub fn monitor(_connections: Vec<Connection>) -> Task<()> {
+pub fn monitor(
+    sensors: Vec<Sensor>,
+    run_sensor: impl Fn(Sensor) -> Task<()> + Send + 'static,
+) -> Task<()> {
     Task::new(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
+        let tasks: Vec<_> = sensors.into_iter()
+            .map(|s| run_sensor(s).run())
+            .collect();
+        futures::future::join_all(tasks).await;
+        Ok(())
     })
 }

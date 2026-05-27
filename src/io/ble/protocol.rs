@@ -371,6 +371,10 @@ impl BleSession {
         self.write_control(&[0x4E]).await
     }
 
+    pub fn take_control_stream(&mut self) -> Option<Pin<Box<dyn futures::Stream<Item = Vec<u8>> + Send + Sync>>> {
+        self._control_notify.take()
+    }
+
     pub async fn read_glucose(
         &self,
         control_stream: &mut (impl futures::Stream<Item = Vec<u8>> + Unpin),
@@ -386,7 +390,7 @@ impl BleSession {
     }
 }
 
-fn parse_egv(data: &[u8]) -> Result<GlucoseReading, String> {
+pub(super) fn parse_egv(data: &[u8]) -> Result<GlucoseReading, String> {
     if data.len() < 19 || data[0] != 0x4E {
         return Err(format!("Invalid EGV packet: {:02x?}", data));
     }

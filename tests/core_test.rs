@@ -97,12 +97,15 @@ async fn test_connect_handles_empty_sensor_list() {
 #[tokio::test]
 #[ignore = "monitor runs indefinitely"]
 async fn test_monitor_runs_indefinitely() {
-    let connections = vec![
-        Connection {
-            sensor: Sensor { serial: "X".to_string(), pin: "1".to_string(), address: "X1".to_string(), shared_key: None },
-            stream: vec![],
-        }
+    let sensors = vec![
+        Sensor { serial: "X".to_string(), pin: "1".to_string(), address: "X1".to_string(), shared_key: None },
     ];
 
-    let _ = monitor(connections).await;
+    let run_sensor = |_: Sensor| Task::new(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+
+    let _ = monitor(sensors, run_sensor).await;
 }
