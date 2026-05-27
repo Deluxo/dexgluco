@@ -17,7 +17,7 @@ const DEXCOM_SERVICE_UUID: &str = "f8083532-849e-531c-c594-30f1f86a4ea5";
 pub struct ScanForSensor(pub String);
 
 impl ScanForSensor {
-    pub fn run(self) -> Task<String> {
+    pub fn run(self) -> Task<(bluer::Device, String)> {
         Task::new(async move {
             let session = Session::new().await.map_err(|e| format!("BLE session: {}", e))?;
             let adapter = session
@@ -53,7 +53,12 @@ impl ScanForSensor {
 
                             if let Ok(Some(name)) = device.name().await {
                                 if name.contains(&self.0) || name.to_uppercase().starts_with("DX") {
-                                    return Ok(addr.to_string());
+                                    eprintln!("[ScanForSensor] matched by name '{}', connecting...", name);
+                                    let addr_str = addr.to_string();
+                                    device.connect().await
+                                        .map_err(|e| format!("BLE connect after scan: {}", e))?;
+                                    eprintln!("[ScanForSensor] connected to {}", addr_str);
+                                    return Ok((device, addr_str));
                                 }
                             }
 
@@ -61,7 +66,12 @@ impl ScanForSensor {
                                 if uuids.iter().any(|u| {
                                     u.to_string().contains(DEXCOM_SERVICE_UUID)
                                 }) {
-                                    return Ok(addr.to_string());
+                                    eprintln!("[ScanForSensor] matched by UUID, connecting...");
+                                    let addr_str = addr.to_string();
+                                    device.connect().await
+                                        .map_err(|e| format!("BLE connect after scan: {}", e))?;
+                                    eprintln!("[ScanForSensor] connected to {}", addr_str);
+                                    return Ok((device, addr_str));
                                 }
                             }
                         }
@@ -80,18 +90,37 @@ impl ScanForSensor {
 async fn connect_ble_device(
     adapter: &bluer::Adapter,
     addr: Address,
+    existing_device: Option<bluer::Device>,
 ) -> Result<bluer::Device, String> {
-    let _ = adapter.remove_device(addr).await;
-
+    if let Some(device) = existing_device {
+        return Ok(device);
+    }
     adapter
         .set_powered(true)
         .await
         .map_err(|e| format!("BLE power: {}", e))?;
 
+    eprintln!(
+        "[connect_ble_device] adapter={:?} addr={} addr_type={:?}",
+        adapter.name(),
+        addr,
+        AddressType::LeRandom,
+    );
+
+    match adapter.connect_device(addr, AddressType::LeRandom).await {
+        Ok(device) => return Ok(device),
+        Err(e) => {
+            eprintln!("[connect_ble_device] ConnectDevice failed: {}, trying device.connect() fallback", e);
+        }
+    }
+
     let device = adapter
-        .connect_device(addr, AddressType::LeRandom)
+        .device(addr)
+        .map_err(|e| format!("BLE device lookup: {}", e))?;
+    device
+        .connect()
         .await
-        .map_err(|e| format!("BLE connect: {}", e))?;
+        .map_err(|e| format!("BLE device.connect(): {}", e))?;
 
     Ok(device)
 }
@@ -99,6 +128,7 @@ async fn connect_ble_device(
 pub struct ConnectSensor {
     pub sensor: Sensor,
     pub shared_key: Option<[u8; 16]>,
+    pub device: Option<bluer::Device>,
 }
 
 impl ConnectSensor {
@@ -106,6 +136,7 @@ impl ConnectSensor {
         ConnectSensor {
             sensor,
             shared_key: None,
+            device: None,
         }
     }
 
@@ -113,6 +144,7 @@ impl ConnectSensor {
         ConnectSensor {
             sensor,
             shared_key: Some(shared_key),
+            device: None,
         }
     }
 
@@ -133,7 +165,7 @@ impl ConnectSensor {
                 .address
                 .parse()
                 .map_err(|e| format!("Invalid address '{}': {}", self.sensor.address, e))?;
-            let device = connect_ble_device(&adapter, addr).await?;
+            let device = connect_ble_device(&adapter, addr, self.device).await?;
 
             let pin_bytes: [u8; 4] = {
                 let b = self.sensor.pin.as_bytes();
@@ -161,11 +193,12 @@ impl ConnectSensor {
 
 pub struct MonitorSensor {
     pub sensor: Sensor,
+    pub device: Option<bluer::Device>,
 }
 
 impl MonitorSensor {
     pub fn new(sensor: Sensor) -> Self {
-        MonitorSensor { sensor }
+        MonitorSensor { sensor, device: None }
     }
 
     pub fn run<F, G>(self, mut on_reading: F, mut on_auth: G) -> Task<()>
@@ -189,7 +222,7 @@ impl MonitorSensor {
                 .address
                 .parse()
                 .map_err(|e| format!("Invalid address '{}': {}", self.sensor.address, e))?;
-            let device = connect_ble_device(&adapter, addr).await?;
+            let device = connect_ble_device(&adapter, addr, self.device).await?;
 
             let pin_bytes: [u8; 4] = {
                 let b = self.sensor.pin.as_bytes();

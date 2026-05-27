@@ -67,60 +67,80 @@ impl BleSession {
     }
 
     pub async fn authenticate(&mut self) -> Result<[u8; 16], String> {
+        eprintln!("[authenticate] discover_chars...");
         self.discover_chars().await?;
+        eprintln!("[authenticate] chars discovered, control={:?} auth={:?} cert={:?}",
+            self.control_char.is_some(), self.auth_char.is_some(), self.cert_char.is_some());
 
+        eprintln!("[authenticate] enabling cert notify...");
         let cert_str = self.cert_char.as_ref().unwrap()
             .notify()
             .await
             .map_err(|e| format!("Cert notify: {}", e))?;
         let mut cert_stream = std::pin::pin!(cert_str);
 
+        eprintln!("[authenticate] enabling auth notify...");
         let auth_str = self.auth_char.as_ref().unwrap()
             .notify()
             .await
             .map_err(|e| format!("Auth notify: {}", e))?;
         let mut auth_stream = std::pin::pin!(auth_str);
 
-        if self.bonded {
-            self.phase = Phase::RequestAuth;
-            self.do_request_auth().await?;
-            loop {
-                tokio::select! {
-                    Some(data) = auth_stream.next() => {
-                        self.handle_auth_notify(&data).await?;
-                        if self.phase == Phase::GetData {
-                            break;
-                        }
-                    }
-                    Some(_) = cert_stream.next() => {}
-                    else => break,
-                }
-            }
-        } else {
-            self.phase = Phase::Round1;
-            self.cert_in_buf.clear();
-            self.write_auth(&[0x0A, 0x00]).await?;
+        eprintln!("[authenticate] bonded={}", self.bonded);
 
-            loop {
-                tokio::select! {
-                    Some(data) = cert_stream.next() => {
-                        self.handle_cert_notify(&data).await?;
-                        if self.phase == Phase::GetData {
-                            break;
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            if self.bonded {
+                self.phase = Phase::RequestAuth;
+                self.do_request_auth().await?;
+                loop {
+                    tokio::select! {
+                        Some(data) = auth_stream.next() => {
+                            self.handle_auth_notify(&data).await?;
+                            if self.phase == Phase::GetData {
+                                return Ok::<(), String>(());
+                            }
                         }
+                        Some(_) = cert_stream.next() => {}
+                        else => return Err("Auth stream ended unexpectedly".into()),
                     }
-                    Some(data) = auth_stream.next() => {
-                        self.handle_auth_notify(&data).await?;
-                        if self.phase == Phase::GetData {
-                            break;
+                }
+            } else {
+                self.phase = Phase::Round1;
+                self.cert_in_buf.clear();
+                eprintln!("[authenticate] writing initial auth packet 0A 00");
+                self.write_auth(&[0x0A, 0x00]).await?;
+                eprintln!("[authenticate] initial auth written, entering notify loop");
+
+                loop {
+                    tokio::select! {
+                        Some(data) = cert_stream.next() => {
+                            eprintln!("[authenticate] cert notify: {} bytes, phase={:?}", data.len(), self.phase);
+                            self.handle_cert_notify(&data).await?;
+                            if self.phase == Phase::GetData {
+                                return Ok::<(), String>(());
+                            }
                         }
+                        Some(data) = auth_stream.next() => {
+                            eprintln!("[authenticate] auth notify: {} bytes, phase={:?}", data.len(), self.phase);
+                            self.handle_auth_notify(&data).await?;
+                            if self.phase == Phase::GetData {
+                                return Ok::<(), String>(());
+                            }
+                        }
+                        else => return Err("Auth/notify streams ended unexpectedly".into()),
                     }
-                    else => break,
                 }
             }
+        }).await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err("Authentication timed out after 30s".to_string()),
         }
 
         debug_assert!(self.ctx.shared_key.iter().any(|&b| b != 0));
+        eprintln!("[authenticate] complete, shared_key={:02x?}", self.ctx.shared_key);
         Ok(self.ctx.shared_key)
     }
 

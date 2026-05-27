@@ -14,6 +14,7 @@ struct AppModel {
     serial: String,
     pin: String,
     address: String,
+    shared_key: Option<[u8; 16]>,
     qr_path: String,
     db_path: String,
 }
@@ -25,6 +26,7 @@ impl Default for AppModel {
             serial: String::new(),
             pin: String::new(),
             address: String::new(),
+            shared_key: None,
             qr_path: "/home/lukas/dev/dexgluco/tests/data/sensor-qr.jpg".into(),
             db_path: "sensors.db".into(),
         }
@@ -49,6 +51,7 @@ enum AppMsg {
     SerialChanged(String),
     PinChanged(String),
     AddressChanged(String),
+    SharedKeyChanged(Option<[u8; 16]>),
     QrPathChanged(String),
     DbPathChanged(String),
 }
@@ -206,6 +209,7 @@ impl SimpleComponent for AppModel {
                         input.send(AppMsg::SerialChanged(s.serial)).ok();
                         input.send(AppMsg::PinChanged(s.pin)).ok();
                         input.send(AppMsg::AddressChanged(s.address)).ok();
+                        input.send(AppMsg::SharedKeyChanged(s.shared_key)).ok();
                     }
                 }
                 Err(_) => {}
@@ -223,6 +227,12 @@ impl SimpleComponent for AppModel {
             AppMsg::SerialChanged(s) => self.serial = s,
             AppMsg::PinChanged(s) => self.pin = s,
             AppMsg::AddressChanged(s) => self.address = s,
+            AppMsg::SharedKeyChanged(k) => {
+                self.shared_key = k;
+                if k.is_some() {
+                    self.logln("  Loaded shared key from DB (bonded)");
+                }
+            }
             AppMsg::QrPathChanged(s) => self.qr_path = s,
             AppMsg::DbPathChanged(s) => self.db_path = s,
 
@@ -232,14 +242,15 @@ impl SimpleComponent for AppModel {
                 let serial = self.serial.clone();
                 let pin = self.pin.clone();
                 let mut address = self.address.clone();
+                let shared_key = self.shared_key;
                 let db_path = self.db_path.clone();
                 let input = sender.input_sender().clone();
 
                 tokio::spawn(async move {
-                    if address.is_empty() {
+                    let device = if address.is_empty() {
                         input.send(AppMsg::Log("  Scanning BLE for sensor...".into())).ok();
                         match ScanForSensor(serial.clone()).run().await {
-                            Ok(addr) => {
+                            Ok((dev, addr)) => {
                                 input.send(AppMsg::AddressChanged(addr.clone())).ok();
                                 address = addr.clone();
 
@@ -251,15 +262,18 @@ impl SimpleComponent for AppModel {
                                 };
                                 SaveSensor::new(db_path.clone(), s).run().await.ok();
                                 input.send(AppMsg::Log("  Saved sensor to DB".into())).ok();
+                                Some(dev)
                             }
                             Err(e) => {
                                 input.send(AppMsg::Log(format!("✗ BLE scan error: {}", e))).ok();
                                 return;
                             }
                         }
-                    }
+                    } else {
+                        None
+                    };
 
-                    let sensor = Sensor { serial: serial.clone(), pin: pin.clone(), address: address.clone(), shared_key: None };
+                    let sensor = Sensor { serial: serial.clone(), pin: pin.clone(), address: address.clone(), shared_key };
                     input.send(AppMsg::Log(format!(
                         "  Connecting to {} @ {} ...", sensor.serial, sensor.address
                     ))).ok();
@@ -291,7 +305,9 @@ impl SimpleComponent for AppModel {
                         });
                     };
 
-                    match MonitorSensor::new(sensor).run(on_reading, on_auth).await {
+                    let mut monitor = MonitorSensor::new(sensor);
+                    monitor.device = device;
+                    match monitor.run(on_reading, on_auth).await {
                         Ok(()) => input.send(AppMsg::Log("✓ Real monitor ended".into())).ok(),
                         Err(e) => input.send(AppMsg::Log(format!("✗ Real monitor error: {}", e))).ok(),
                     };
