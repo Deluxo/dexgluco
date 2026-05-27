@@ -5,7 +5,7 @@ pub mod certs;
 use crate::core::{Connection, Sensor, GlucoseReading};
 use crate::io::task::Task;
 use bluer::{
-    AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Session,
+    AdapterEvent, Address, AddressType, DiscoveryFilter, DiscoveryTransport, Session,
 };
 use futures::StreamExt;
 use std::time::Duration;
@@ -38,44 +38,62 @@ impl ScanForSensor {
                 .await
                 .map_err(|e| format!("BLE filter: {}", e))?;
 
-            let device_events = adapter
-                .discover_devices()
-                .await
-                .map_err(|e| format!("BLE discover: {}", e))?;
-            let mut device_events = std::pin::pin!(device_events);
+            loop {
+                let stream = adapter
+                    .discover_devices()
+                    .await
+                    .map_err(|e| format!("BLE discover: {}", e))?;
+                let mut stream = std::pin::pin!(stream);
 
-            let start = std::time::Instant::now();
-            let timeout = Duration::from_secs(30);
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                        Ok(Some(AdapterEvent::DeviceAdded(addr))) => {
+                            let device =
+                                adapter.device(addr).map_err(|e| format!("Device: {}", e))?;
 
-            while start.elapsed() < timeout {
-                match tokio::time::timeout(Duration::from_secs(5), device_events.next()).await {
-                    Ok(Some(AdapterEvent::DeviceAdded(addr))) => {
-                        let device =
-                            adapter.device(addr).map_err(|e| format!("Device: {}", e))?;
+                            if let Ok(Some(name)) = device.name().await {
+                                if name.contains(&self.0) || name.to_uppercase().starts_with("DX") {
+                                    return Ok(addr.to_string());
+                                }
+                            }
 
-                        if let Ok(Some(name)) = device.name().await {
-                            if name.contains(&self.0) {
-                                return Ok(addr.to_string());
+                            if let Ok(Some(uuids)) = device.uuids().await {
+                                if uuids.iter().any(|u| {
+                                    u.to_string().contains(DEXCOM_SERVICE_UUID)
+                                }) {
+                                    return Ok(addr.to_string());
+                                }
                             }
                         }
-
-                        if let Ok(Some(uuids)) = device.uuids().await {
-                            if uuids.iter().any(|u| {
-                                u.to_string().contains(DEXCOM_SERVICE_UUID)
-                            }) {
-                                return Ok(addr.to_string());
-                            }
-                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(_) => {}
                     }
-                    Ok(Some(_)) => {}
-                    Ok(None) => break,
-                    Err(_) => {}
                 }
-            }
 
-            Err(format!("Sensor '{}' not found via BLE", self.0))
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
         })
     }
+}
+
+async fn connect_ble_device(
+    adapter: &bluer::Adapter,
+    addr: Address,
+) -> Result<bluer::Device, String> {
+    let _ = adapter.remove_device(addr).await;
+
+    adapter
+        .set_powered(true)
+        .await
+        .map_err(|e| format!("BLE power: {}", e))?;
+
+    let device = adapter
+        .connect_device(addr, AddressType::LeRandom)
+        .await
+        .map_err(|e| format!("BLE connect: {}", e))?;
+
+    Ok(device)
 }
 
 pub struct ConnectSensor {
@@ -105,31 +123,17 @@ impl ConnectSensor {
                 .default_adapter()
                 .await
                 .map_err(|e| format!("BLE adapter: {}", e))?;
+            adapter
+                .set_powered(true)
+                .await
+                .map_err(|e| format!("BLE power: {}", e))?;
 
             let addr: Address = self
                 .sensor
                 .address
                 .parse()
                 .map_err(|e| format!("Invalid address '{}': {}", self.sensor.address, e))?;
-            let device = adapter.device(addr).map_err(|e| format!("Device: {}", e))?;
-
-            device
-                .connect()
-                .await
-                .map_err(|e| format!("BLE connect: {}", e))?;
-
-            let wait_start = std::time::Instant::now();
-            let wait_timeout = Duration::from_secs(10);
-            while wait_start.elapsed() < wait_timeout {
-                if device
-                    .is_services_resolved()
-                    .await
-                    .map_err(|e| format!("Services resolved check: {}", e))?
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
+            let device = connect_ble_device(&adapter, addr).await?;
 
             let pin_bytes: [u8; 4] = {
                 let b = self.sensor.pin.as_bytes();
@@ -164,9 +168,10 @@ impl MonitorSensor {
         MonitorSensor { sensor }
     }
 
-    pub fn run<F>(self, mut on_reading: F) -> Task<()>
+    pub fn run<F, G>(self, mut on_reading: F, mut on_auth: G) -> Task<()>
     where
         F: FnMut(GlucoseReading) + Send + 'static,
+        G: FnMut([u8; 16]) + Send + 'static,
     {
         Task::new(async move {
             let session = Session::new().await.map_err(|e| format!("BLE session: {}", e))?;
@@ -174,31 +179,17 @@ impl MonitorSensor {
                 .default_adapter()
                 .await
                 .map_err(|e| format!("BLE adapter: {}", e))?;
+            adapter
+                .set_powered(true)
+                .await
+                .map_err(|e| format!("BLE power: {}", e))?;
 
             let addr: Address = self
                 .sensor
                 .address
                 .parse()
                 .map_err(|e| format!("Invalid address '{}': {}", self.sensor.address, e))?;
-            let device = adapter.device(addr).map_err(|e| format!("Device: {}", e))?;
-
-            device
-                .connect()
-                .await
-                .map_err(|e| format!("BLE connect: {}", e))?;
-
-            let wait_start = std::time::Instant::now();
-            let wait_timeout = Duration::from_secs(10);
-            while wait_start.elapsed() < wait_timeout {
-                if device
-                    .is_services_resolved()
-                    .await
-                    .map_err(|e| format!("Services resolved check: {}", e))?
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
+            let device = connect_ble_device(&adapter, addr).await?;
 
             let pin_bytes: [u8; 4] = {
                 let b = self.sensor.pin.as_bytes();
@@ -214,7 +205,8 @@ impl MonitorSensor {
                 self.sensor.shared_key.as_ref(),
             );
 
-            ble_session.authenticate().await?;
+            let shared_key = ble_session.authenticate().await?;
+            on_auth(shared_key);
 
             let mut control_stream = ble_session
                 .take_control_stream()

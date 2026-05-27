@@ -1,0 +1,9 @@
+serial:
+764971698097
+
+pin:
+2777
+
+address:
+FD:D2:EF:79:E7:9F
+

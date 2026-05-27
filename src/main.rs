@@ -2,15 +2,13 @@ use relm4::prelude::*;
 use relm4::gtk;
 use gtk::prelude::*;
 
-use dexgluco::core::{get_sensors, connect, monitor, Sensor, Connection, GlucoseReading};
-use dexgluco::io::Task;
+use dexgluco::core::{Sensor, GlucoseReading};
 use dexgluco::io::qr::ScanDataMatrix;
-use dexgluco::io::storage::LoadSensors;
-use dexgluco::io::ble::MonitorSensor;
+use dexgluco::io::storage::{LoadSensors, SaveSensor};
+use dexgluco::io::ble::{MonitorSensor, ScanForSensor};
 
 // ============================== Model ==============================
 
-#[derive(Default)]
 struct AppModel {
     log: String,
     serial: String,
@@ -18,6 +16,19 @@ struct AppModel {
     address: String,
     qr_path: String,
     db_path: String,
+}
+
+impl Default for AppModel {
+    fn default() -> Self {
+        Self {
+            log: String::new(),
+            serial: String::new(),
+            pin: String::new(),
+            address: String::new(),
+            qr_path: "/home/lukas/dev/dexgluco/tests/data/sensor-qr.jpg".into(),
+            db_path: "sensors.db".into(),
+        }
+    }
 }
 
 impl AppModel {
@@ -33,10 +44,7 @@ impl AppModel {
 enum AppMsg {
     Log(String),
     ClearLog,
-    GetSensors,
-    Connect,
     Monitor,
-    MonitorReal,
     ScanQr,
     SerialChanged(String),
     PinChanged(String),
@@ -84,19 +92,16 @@ impl SimpleComponent for AppModel {
 
         let serial_entry = gtk::Entry::new();
         serial_entry.set_hexpand(true);
-        serial_entry.set_text("DXCM123456");
 
         let pin_entry = gtk::Entry::new();
         pin_entry.set_hexpand(true);
-        pin_entry.set_text("123456");
 
         let address_entry = gtk::Entry::new();
         address_entry.set_hexpand(true);
-        address_entry.set_text("00:11:22:33:44:55");
 
         let qr_entry = gtk::Entry::new();
         qr_entry.set_hexpand(true);
-        qr_entry.set_text("tests/data/sensor-qr.jpg");
+        qr_entry.set_text("/home/lukas/dev/dexgluco/tests/data/sensor-qr.jpg");
 
         let status_label = gtk::Label::new(Some("Ready"));
         status_label.set_xalign(0.0);
@@ -124,19 +129,13 @@ impl SimpleComponent for AppModel {
         row2.append(&gtk::Label::new(Some("QR Path:")));
         row2.append(&qr_entry);
 
-        let get_btn = gtk::Button::with_label("Get Sensors");
-        let connect_btn = gtk::Button::with_label("Connect");
         let monitor_btn = gtk::Button::with_label("Monitor");
-        let monitor_real_btn = gtk::Button::with_label("Monitor Real");
         let scan_btn = gtk::Button::with_label("Scan QR");
         let clear_btn = gtk::Button::with_label("Clear Log");
 
         let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         btn_box.set_homogeneous(true);
-        btn_box.append(&get_btn);
-        btn_box.append(&connect_btn);
         btn_box.append(&monitor_btn);
-        btn_box.append(&monitor_real_btn);
         btn_box.append(&scan_btn);
         btn_box.append(&clear_btn);
 
@@ -173,21 +172,9 @@ impl SimpleComponent for AppModel {
             move |e| sender.input(AppMsg::QrPathChanged(e.text().to_string()))
         });
 
-        get_btn.connect_clicked({
-            let sender = sender.clone();
-            move |_| sender.input(AppMsg::GetSensors)
-        });
-        connect_btn.connect_clicked({
-            let sender = sender.clone();
-            move |_| sender.input(AppMsg::Connect)
-        });
         monitor_btn.connect_clicked({
             let sender = sender.clone();
             move |_| sender.input(AppMsg::Monitor)
-        });
-        monitor_real_btn.connect_clicked({
-            let sender = sender.clone();
-            move |_| sender.input(AppMsg::MonitorReal)
         });
         scan_btn.connect_clicked({
             let sender = sender.clone();
@@ -210,6 +197,21 @@ impl SimpleComponent for AppModel {
 
         let model = AppModel::default();
 
+        let input = sender.input_sender().clone();
+        let db_path = model.db_path.clone();
+        tokio::spawn(async move {
+            match LoadSensors::new(db_path).run().await {
+                Ok(sensors) => {
+                    if let Some(s) = sensors.into_iter().next() {
+                        input.send(AppMsg::SerialChanged(s.serial)).ok();
+                        input.send(AppMsg::PinChanged(s.pin)).ok();
+                        input.send(AppMsg::AddressChanged(s.address)).ok();
+                    }
+                }
+                Err(_) => {}
+            }
+        });
+
         ComponentParts { model, widgets }
     }
 
@@ -224,151 +226,40 @@ impl SimpleComponent for AppModel {
             AppMsg::QrPathChanged(s) => self.qr_path = s,
             AppMsg::DbPathChanged(s) => self.db_path = s,
 
-            AppMsg::GetSensors => {
-                self.logln("▶ Get Sensors");
+            AppMsg::Monitor => {
+                self.logln("▶ Monitor (BLE)");
+
                 let serial = self.serial.clone();
                 let pin = self.pin.clone();
-                let address = self.address.clone();
+                let mut address = self.address.clone();
                 let db_path = self.db_path.clone();
                 let input = sender.input_sender().clone();
 
                 tokio::spawn(async move {
-                    input.send(AppMsg::Log("  Trying storage...".into())).ok();
-                    let result = get_sensors(
-                        {
-                            let p = db_path.clone();
-                            move || LoadSensors::new(p.clone()).run()
-                        },
-                        {
-                            let input = input.clone();
-                            let serial = serial.clone();
-                            let pin = pin.clone();
-                            let address = address.clone();
-                            move || {
-                                input.send(AppMsg::Log("  Storage empty — creating mock sensor".into())).ok();
-                                Task::from_value(Sensor {
+                    if address.is_empty() {
+                        input.send(AppMsg::Log("  Scanning BLE for sensor...".into())).ok();
+                        match ScanForSensor(serial.clone()).run().await {
+                            Ok(addr) => {
+                                input.send(AppMsg::AddressChanged(addr.clone())).ok();
+                                address = addr.clone();
+
+                                let s = Sensor {
                                     serial: serial.clone(),
                                     pin: pin.clone(),
-                                    address: address.clone(),
+                                    address: addr,
                                     shared_key: None,
-                                })
+                                };
+                                SaveSensor::new(db_path.clone(), s).run().await.ok();
+                                input.send(AppMsg::Log("  Saved sensor to DB".into())).ok();
                             }
-                        },
-                    ).run().await;
-
-                    match result {
-                        Ok(sensors) => {
-                            input.send(AppMsg::Log(format!("  Got {} sensor(s)", sensors.len()))).ok();
-                            for s in &sensors {
-                                input.send(AppMsg::Log(
-                                    format!("    {} @ {}", s.serial, s.address)
-                                )).ok();
+                            Err(e) => {
+                                input.send(AppMsg::Log(format!("✗ BLE scan error: {}", e))).ok();
+                                return;
                             }
-                            input.send(AppMsg::Log("✓ Get Sensors OK".into())).ok();
-                        }
-                        Err(e) => {
-                            input.send(AppMsg::Log(format!("✗ Get Sensors error: {}", e))).ok();
                         }
                     }
-                });
-            }
 
-            AppMsg::Connect => {
-                self.logln("▶ Connect");
-                let serial = self.serial.clone();
-                let pin = self.pin.clone();
-                let address = self.address.clone();
-                let input = sender.input_sender().clone();
-
-                tokio::spawn(async move {
-                    let sensor = Sensor { serial, pin, address, shared_key: None };
-                    input.send(AppMsg::Log(format!("  Connecting to {}...", sensor.serial))).ok();
-
-                    let result = connect(
-                        move |s| {
-                            Task::from_value(Connection {
-                                sensor: s,
-                                stream: vec![],
-                            })
-                        },
-                        vec![sensor],
-                    ).run().await;
-
-                    match result {
-                        Ok(conns) => {
-                            input.send(AppMsg::Log(format!("  Got {} connection(s)", conns.len()))).ok();
-                            for c in &conns {
-                                input.send(AppMsg::Log(
-                                    format!("    {} — {} cached readings", c.sensor.serial, c.stream.len())
-                                )).ok();
-                            }
-                            input.send(AppMsg::Log("✓ Connect OK".into())).ok();
-                        }
-                        Err(e) => {
-                            input.send(AppMsg::Log(format!("✗ Connect error: {}", e))).ok();
-                        }
-                    }
-                });
-            }
-
-            AppMsg::Monitor => {
-                self.logln("▶ Monitor (mock via core::monitor)");
-
-                let sensor = Sensor {
-                    serial: self.serial.clone(),
-                    pin: self.pin.clone(),
-                    address: self.address.clone(),
-                    shared_key: None,
-                };
-                let input = sender.input_sender().clone();
-                let mock_readings: Vec<GlucoseReading> = vec![
-                    GlucoseReading { value: 142.0, timestamp: 1700000000, trend: 3 },
-                    GlucoseReading { value: 138.0, timestamp: 1700000005, trend: 2 },
-                    GlucoseReading { value: 145.0, timestamp: 1700000010, trend: 4 },
-                    GlucoseReading { value: 151.0, timestamp: 1700000015, trend: 5 },
-                    GlucoseReading { value: 147.0, timestamp: 1700000020, trend: 2 },
-                ];
-
-                tokio::spawn(async move {
-                    let input_sensor = input.clone();
-                    let readings = mock_readings.clone();
-                    let run_sensor = move |_: Sensor| {
-                        let input = input_sensor.clone();
-                        let readings = readings.clone();
-                        Task::new(async move {
-                            for r in &readings {
-                                input.send(AppMsg::Log(
-                                    format!("  Glucose: {} mg/dL  trend: {}  ts: {}",
-                                        r.value, r.trend, r.timestamp)
-                                )).ok();
-                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                            }
-                            input.send(AppMsg::Log("✓ Mock sensor done".into())).ok();
-                            loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                            }
-                        })
-                    };
-
-                    match monitor(vec![sensor], run_sensor).await {
-                        Ok(()) => input.send(AppMsg::Log("✓ Monitor completed".into())).ok(),
-                        Err(e) => input.send(AppMsg::Log(format!("✗ Monitor error: {}", e))).ok(),
-                    }
-                });
-            }
-
-            AppMsg::MonitorReal => {
-                self.logln("▶ Monitor Real (BLE)");
-
-                let sensor = Sensor {
-                    serial: self.serial.clone(),
-                    pin: self.pin.clone(),
-                    address: self.address.clone(),
-                    shared_key: None,
-                };
-                let input = sender.input_sender().clone();
-
-                tokio::spawn(async move {
+                    let sensor = Sensor { serial: serial.clone(), pin: pin.clone(), address: address.clone(), shared_key: None };
                     input.send(AppMsg::Log(format!(
                         "  Connecting to {} @ {} ...", sensor.serial, sensor.address
                     ))).ok();
@@ -381,10 +272,29 @@ impl SimpleComponent for AppModel {
                         ))).ok();
                     };
 
-                    match MonitorSensor::new(sensor).run(on_reading).await {
+                    let input_cb2 = input.clone();
+                    let db_path2 = db_path.clone();
+                    let serial2 = serial.clone();
+                    let pin2 = pin.clone();
+                    let address2 = address.clone();
+                    let on_auth = move |shared_key: [u8; 16]| {
+                        let sensor = Sensor {
+                            serial: serial2.clone(),
+                            pin: pin2.clone(),
+                            address: address2.clone(),
+                            shared_key: Some(shared_key),
+                        };
+                        input_cb2.send(AppMsg::Log("  Authenticated — saving shared key".into())).ok();
+                        let db = db_path2.clone();
+                        tokio::spawn(async move {
+                            SaveSensor::new(db, sensor).run().await.ok();
+                        });
+                    };
+
+                    match MonitorSensor::new(sensor).run(on_reading, on_auth).await {
                         Ok(()) => input.send(AppMsg::Log("✓ Real monitor ended".into())).ok(),
                         Err(e) => input.send(AppMsg::Log(format!("✗ Real monitor error: {}", e))).ok(),
-                    }
+                    };
                 });
             }
 
@@ -398,6 +308,8 @@ impl SimpleComponent for AppModel {
 
                     match ScanDataMatrix(path).run().await {
                         Ok((serial, pin)) => {
+                            input.send(AppMsg::SerialChanged(serial.clone())).ok();
+                            input.send(AppMsg::PinChanged(pin.clone())).ok();
                             input.send(AppMsg::Log(
                                 format!("✓ QR decoded — serial: {}, PIN: {}", serial, pin)
                             )).ok();
@@ -418,6 +330,19 @@ impl SimpleComponent for AppModel {
         widgets.log_view.scroll_to_iter(&mut end, 0.0, true, 0.0, 0.0);
         let status = self.log.lines().last().unwrap_or("Ready");
         widgets.status_label.set_text(status);
+
+        if widgets.serial_entry.text().as_str() != self.serial {
+            widgets.serial_entry.set_text(&self.serial);
+        }
+        if widgets.pin_entry.text().as_str() != self.pin {
+            widgets.pin_entry.set_text(&self.pin);
+        }
+        if widgets.address_entry.text().as_str() != self.address {
+            widgets.address_entry.set_text(&self.address);
+        }
+        if widgets.qr_entry.text().as_str() != self.qr_path {
+            widgets.qr_entry.set_text(&self.qr_path);
+        }
     }
 }
 
